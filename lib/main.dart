@@ -2,8 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart'; // Import dotenv
 import 'package:http/http.dart' as http;
 import 'dart:convert';
-import 'package:image_picker/image_picker.dart';
-import 'package:tflite/tflite.dart';
 
 Future<void> main() async {
   await dotenv.load(); // Load the .env file
@@ -36,7 +34,7 @@ class _ChatScreenState extends State<ChatScreen> {
   String _selectedModel =
       'deepseek/deepseek-chat-v3-0324:free'; // Default model
 
-  void _sendMessage(String message) {
+  Future<void> _sendMessage(String message) async {
     if (message.isEmpty) return;
 
     setState(() {
@@ -44,115 +42,52 @@ class _ChatScreenState extends State<ChatScreen> {
       _isLoading = true;
     });
 
-    final stream = _streamAIResponse(message, _selectedModel);
+    final response = await _fetchAIResponse(message, _selectedModel);
 
-    stream.listen(
-      (chunk) {
-        setState(() {
-          if (_messages.isNotEmpty && _messages.last.containsKey('bot')) {
-            _messages.last['bot'] = (_messages.last['bot'] ?? '') + chunk;
-          } else {
-            _messages.add({'bot': chunk});
-          }
-        });
-      },
-      onDone: () {
-        setState(() {
-          _isLoading = false;
-        });
-      },
-      onError: (error) {
-        setState(() {
-          _messages.add({'bot': '请求失败: $error'});
-          _isLoading = false;
-        });
-      },
-    );
+    setState(() {
+      _messages.add({'bot': response});
+      _isLoading = false;
+    });
 
     _controller.clear();
   }
 
-  Stream<String> _streamAIResponse(String prompt, String model) async* {
-    final apiKey = dotenv.env['API_KEY'];
+  Future<String> _fetchAIResponse(String prompt, String model) async {
+    final apiKey = dotenv.env['API_KEY']; // 从 .env 文件中读取 API_KEY
+    if (apiKey == null || apiKey.isEmpty) {
+      return 'API 密钥未配置。请检查 .env 文件中的 API_KEY。';
+    }
+
     const apiUrl = 'https://openrouter.ai/api/v1/chat/completions';
 
     try {
-      final request =
-          http.Request('POST', Uri.parse(apiUrl))
-            ..headers.addAll({
-              'Content-Type': 'application/json',
-              'Authorization': 'Bearer $apiKey',
-            })
-            ..body = json.encode({
-              'model': model,
-              'messages': [
-                {"role": "user", "content": prompt},
-              ],
-              'stream': true,
-            });
+      final response = await http.post(
+        Uri.parse(apiUrl),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $apiKey',
+        },
+        body: json.encode({
+          'model': model,
+          'messages': [
+            {"role": "user", "content": prompt},
+          ],
+        }),
+      );
 
-      print('Request: ${request.body}'); // 打印请求体
-
-      final streamedResponse = await request.send();
-
-      if (streamedResponse.statusCode == 200) {
-        final stream = streamedResponse.stream.transform(utf8.decoder);
-        String buffer = '';
-        await for (var chunk in stream) {
-          buffer += chunk;
-          final lines = buffer.split('\n');
-          buffer = lines.removeLast(); // 保留未完成的部分
-          for (var line in lines) {
-            if (line.trim().isNotEmpty) {
-              try {
-                final data = json.decode(line); // 尝试解析 JSON
-                if (data['choices'] != null && data['choices'].isNotEmpty) {
-                  yield data['choices'][0]['delta']['content'] ?? '';
-                }
-              } catch (e) {
-                print('JSON 解析错误: $e'); // 打印解析错误
-                print('原始数据: $line'); // 打印导致错误的原始数据
-              }
-            }
-          }
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        if (data['choices'] != null && data['choices'].isNotEmpty) {
+          return data['choices'][0]['message']['content'].trim();
+        } else {
+          return 'AI 无法生成响应，请稍后再试。';
         }
       } else {
-        print('Error: ${streamedResponse.statusCode}'); // 打印错误状态码
-        yield 'AI 无法响应，请稍后再试。错误代码: ${streamedResponse.statusCode}';
+        return 'AI 无法响应，请稍后再试。错误代码: ${response.statusCode}';
       }
     } catch (e) {
-      print('Exception: $e'); // 打印异常
-      yield '请求失败，请检查您的网络连接或 API 配置。错误: $e';
+      return '请求失败，请检查您的网络连接或 API 配置。错误: $e';
     }
-  }
-
-  Future<void> pickImage() async {
-    final ImagePicker _picker = ImagePicker();
-    final XFile? image = await _picker.pickImage(source: ImageSource.gallery);
-
-    if (image != null) {
-      print('Image path: ${image.path}');
-      await classifyImage(
-        image.path,
-      ); // Pass the image to the AI model for processing
-    }
-  }
-
-  Future<void> loadModel() async {
-    String? res = await Tflite.loadModel(
-      model: "assets/model.tflite",
-      labels: "assets/labels.txt",
-    );
-    print(res);
-  }
-
-  Future<void> classifyImage(String imagePath) async {
-    var recognitions = await Tflite.runModelOnImage(
-      path: imagePath,
-      numResults: 5,
-      threshold: 0.5,
-    );
-    print(recognitions);
   }
 
   @override
